@@ -1,0 +1,5 @@
+out/
+temp/
+dist/
+build/
+error.log

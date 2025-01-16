@@ -1,0 +1,22 @@
+https://stackoverflow.com/questions/38468442/multiple-doc-to-docx-file-conversion-using-python
+
+#!/usr/bin/env python
+
+import glob
+import win32com.client
+
+word = win32com.client.Dispatch("Word.Application")
+word.visible = 0
+
+for i, doc in enumerate(glob.iglob("*.doc")):
+    in_file = os.path.abspath(doc)
+    wb = word.Documents.Open(in_file)
+    out_file = os.path.abspath("out{}.docx".format(i))
+    wb.SaveAs2(out_file, FileFormat=16) # file format for docx
+    wb.Close()
+
+word.Quit()
+
+pip install doc2docx
+pip install tkinterdnd2
+https://github.com/Eliav2/tkinterdnd2
