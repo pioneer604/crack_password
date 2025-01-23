@@ -12,11 +12,15 @@ import logging
 import os
 import re
 import shutil
-from pathlib import Path
-from tkinter import ttk
+import threading
 import tkinter as tk
+from pathlib import Path
+from queue import Queue
+from tkinter import ttk
 
+import pythoncom
 import sys
+import time
 import win32com.client
 from PIL import ImageTk, Image
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -66,14 +70,33 @@ class App(TkinterDnD.Tk):
         self.lbl_image.grid(row=0, column=0, sticky='nsew', padx=5, pady=5)
         self.lbl_image.grid_columnconfigure(0, weight=1)
         self.p = ttk.Progressbar(self, orient="horizontal", length=200, mode="determinate",
-                            takefocus=True, maximum=100)
+                                 takefocus=True, maximum=100)
         self.p.grid(row=1, column=0, sticky='nsew', padx=5, pady=(0, 5))
-        self.p['value'] = 0
+        # self.p['value'] = 0
         self.desc_var = tk.StringVar()
         self.msg_desc = tk.Message(self, textvariable=self.desc_var, width=200)
         self.msg_desc.grid(row=2, column=0, sticky='nsw', padx=5, pady=(0, 5))
         self.desc_var.set('状态:')
+        self.q = Queue()
+        self.is_busy = False
+        self.update()
         self.attributes("-topmost", True)
+        self.after(20, self.check_message)
+
+    def check_message(self):
+        """检查停止标志，检测到就退出"""
+        if not self.q.empty():
+            message = self.q.get_nowait()
+            self.desc_var.set(message["text"])
+            self.p['value'] = message["progress_value"]
+            if self.p['value'] == 99.9:
+                self.is_busy = False
+            self.update()
+            file_path = message.get("file_path")
+            if file_path:
+                # print(f"convert sucess, begin cracking {file_path}")
+                self.unprotect(file_path)
+        self.after(20, self.check_message)
 
     @staticmethod
     def clear_temp():
@@ -94,13 +117,100 @@ class App(TkinterDnD.Tk):
                 f.write(cracked)
                 protected = True
             else:
-                print("can not find protection element")
+                # print("can not find protection element")
                 protected = False
             return protected
 
+    @staticmethod
+    def convert_file(q, id, file_path):
+        # print("enter convert_file")
+        path = Path(file_path)
+        file_name = path.name
+        # print(file_name)
+        file_base = path.stem
+        # print(file_base)
+        file_ext = path.suffix
+        # print(file_ext)
+        now = datetime.datetime.now()  # current date and time
+        date_time = now.strftime('_%Y%m%d_%H%M%S')
+        message = {}
+        message["text"] = '状态:开始格式转换'
+        message["progress_value"] = 0
+        q.put(message)
+        # Initialize
+        pythoncom.CoInitialize()
+        if file_ext == ".doc":
+            word = win32com.client.Dispatch(pythoncom.CoGetInterfaceAndReleaseStream(id, pythoncom.IID_IDispatch))
+            word.visible = 0
+            wb = word.Documents.Open(file_path)
+            temp_file = os.path.join(folder_paths["temp"], f"{file_base}{file_ext}x")
+            wb.SaveAs2(temp_file, FileFormat=16)  # file format for docx
+            wb.Close()
+            word.Quit()
+            pythoncom.CoUninitialize()
+            message["text"] = '状态:格式转换完成，开始破解'
+            message["progress_value"] = 99.9
+            message["file_path"] = temp_file
+            q.put(message)
+        else:
+            excel = win32com.client.Dispatch(pythoncom.CoGetInterfaceAndReleaseStream(id, pythoncom.IID_IDispatch))
+            excel.visible = 0
+            wb = excel.Workbooks.Open(path)
+            temp_file = os.path.join(folder_paths["temp"], f"{file_base}{file_ext}x")
+            wb.SaveAs(temp_file, FileFormat=51)  # FileFormat = 51 is for .xlsx extension
+            wb.Close()  # FileFormat = 56 is for .xls extension
+            excel.Quit()
+            pythoncom.CoUninitialize()
+            message["text"] = '状态:格式转换完成，开始破解'
+            message["progress_value"] = 99.9
+            message["file_path"] = temp_file
+            q.put(message)
+
     def unprotect(self, file_path):
-        self.p['value'] = 0
-        self.desc_var.set('状态:')
+        if not self.is_busy:
+            file_path = file_path.replace("{", "").replace("}", "")
+            path = Path(file_path)
+            file_ext = path.suffix
+            if file_ext == ".doc":
+                # Initialize
+                pythoncom.CoInitialize()
+                # Get instance
+                wd = win32com.client.Dispatch("Word.Application")
+                # Create id
+                wd_id = pythoncom.CoMarshalInterThreadInterfaceInStream(pythoncom.IID_IDispatch, wd)
+                t = threading.Thread(target=App.convert_file, args=(self.q, wd_id, file_path))
+                t.start()
+            elif file_ext == ".xls":
+                # Initialize
+                pythoncom.CoInitialize()
+                # Get instance
+                xl = win32com.client.Dispatch("Excel.Application")
+                # Create id
+                xl_id = pythoncom.CoMarshalInterThreadInterfaceInStream(pythoncom.IID_IDispatch, xl)
+                t = threading.Thread(target=App.convert_file, args=(self.q, xl_id, file_path))
+                t.start()
+            elif file_ext == ".docx":
+                file_size = os.path.getsize(file_path)
+                if file_size == 0:
+                    message = {}
+                    message["text"] = '状态:docx为空文档，无需破解'
+                    message["progress_value"] = 99.9
+                    self.q.put(message)
+                else:
+                    t = threading.Thread(target=App.main_work, args=(self.q, file_path))
+                    t.start()
+            elif file_ext == ".xlsx":
+                t = threading.Thread(target=App.main_work, args=(self.q, file_path))
+                t.start()
+
+    @staticmethod
+    def main_work(q, file_path):
+        # print("enter main_work")
+        file_path = file_path.replace("{", "").replace("}", "")
+        message = {}
+        message["text"] = "状态：开始破解"
+        message["progress_value"] = 0
+        q.put(message)
         path = Path(file_path)
         file_name = path.name
         file_base = path.stem
@@ -109,15 +219,24 @@ class App(TkinterDnD.Tk):
         date_time = now.strftime('_%Y%m%d_%H%M%S')
         zip_path = os.path.join(folder_paths["temp"], file_name + date_time)
         if file_ext in (".xlsx", ".docx"):
+            pythoncom.CoUninitialize()
             if os.path.isdir(zip_path):
                 shutil.rmtree(zip_path)
             shutil.unpack_archive(path, zip_path, "zip")
-            self.p['value'] += 20
-            self.desc_var.set('状态:解压完成')
+            message["text"] = '状态:解压完成'
+            message["progress_value"] = 20
+            q.put(message)
             if os.path.isfile(zip_path):
                 os.remove(zip_path)
             protected = False
             if file_ext == ".xlsx":
+                workbook_path = os.path.join(zip_path, "xl", "workbook.xml")
+                result = App.modify_xml(workbook_path, r"<workbookProtection.*?/>")
+                if result:
+                    protected = result
+                result = App.modify_xml(workbook_path, r"<fileSharing.*?/>")
+                if result:
+                    protected = result
                 sheet_path = os.path.join(zip_path, "xl", "worksheets")
                 file_list = os.listdir(sheet_path)
                 pat = re.compile(r"^sheet\d+\.xml$")
@@ -131,48 +250,26 @@ class App(TkinterDnD.Tk):
                 settings_path = os.path.join(zip_path, "word", "settings.xml")
                 protected = App.modify_xml(settings_path, r"<w:documentProtection.*?/>")
             if protected:
-                self.p['value'] += 20
-                self.desc_var.set('状态:完成修改xml')
+                message["text"] = '状态:完成修改xml'
+                message["progress_value"] = 40
+                q.put(message)
                 shutil.make_archive(os.path.join(folder_paths["temp"], f"{file_base}{date_time}"), "zip",
                                     root_dir=zip_path, base_dir=".")
-                self.p['value'] += 20
-                self.desc_var.set('状态:重新压缩成zip')
+                message["text"] = '状态:重新压缩成zip'
+                message["progress_value"] = 60
+                q.put(message)
                 if os.path.isdir(zip_path):
                     shutil.rmtree(zip_path)
                 os.rename(os.path.join(folder_paths["temp"], f"{file_base}{date_time}.zip"),
                           os.path.join(folder_paths["out"], f"{file_base}{date_time}{file_ext}"))
-                self.p['value'] = 100
-                self.desc_var.set('状态:完成，请到out文件夹中查看')
+                message["text"] = '状态:完成，请到out文件夹中查看'
+                message["progress_value"] = 99.9
+                q.put(message)
             else:
-                self.p['value'] = 0
-                self.desc_var.set('状态:文件没有被保护！')
+                message["text"] = '状态:文件没有被保护！'
+                message["progress_value"] = 99.9
+                q.put(message)
             App.clear_temp()
-        elif file_ext == ".doc":
-            self.p['value'] = 0
-            self.desc_var.set('状态:开始格式转换')
-            word = win32com.client.Dispatch("Word.Application")
-            word.visible = 0
-            wb = word.Documents.Open(file_path)
-            wb.SaveAs2(os.path.join(folder_paths["temp"], f"{file_base}.docx"),
-                       FileFormat=16)  # file format for docx
-            wb.Close()
-            word.Quit()
-            self.p['value'] = 100
-            self.desc_var.set('状态:格式转换完成，开始破解')
-            self.unprotect(os.path.join(folder_paths["temp"], f"{file_base}.docx"))
-        elif file_ext == ".xls":
-            self.p['value'] = 0
-            self.desc_var.set('状态:开始格式转换')
-            excel = win32com.client.Dispatch('Excel.Application')
-            excel.visible = 0
-            wb = excel.Workbooks.Open(path)
-            wb.SaveAs(os.path.join(folder_paths["temp"], f"{file_base}.xlsx"),
-                      FileFormat=51)  # FileFormat = 51 is for .xlsx extension
-            wb.Close()  # FileFormat = 56 is for .xls extension
-            excel.Quit()
-            self.p['value'] = 100
-            self.desc_var.set('状态:格式转换完成，开始破解')
-            self.unprotect(os.path.join(folder_paths["temp"], f"{file_base}.xlsx"))
 
 
 if __name__ == "__main__":
